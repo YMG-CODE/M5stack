@@ -2795,13 +2795,13 @@ void receiveEvent(int bytes) {
         uint16_t newValue = (high << 8) | low;
         applyCPM(newValue);
         activeSource = SRC_I2C;
-        Serial.printf("I2C Received CPM=%d\n", newValue);
+        // Serial.printf("I2C Received CPM=%d\n", newValue);
     }
     else if (cmd == 0x02 && bytes >= 1) {
         uint8_t layer = Wire.read();
         applyLayer(layer);
         activeSource = SRC_I2C;
-        Serial.printf("I2C Received Layer=%d\n", layer);
+        // Serial.printf("I2C Received Layer=%d\n", layer);
     }
 
     else if (cmd >= 0x20 && bytes >= 1) {
@@ -2823,13 +2823,16 @@ void processUSBSerial() {
     while (Serial.available() > 0) {
         uint8_t b = Serial.read();
 
-        Serial.printf("[RAW] %02X \n", b);
+        // Serial.printf("[RAW] %02X \n", b);
 
         switch (usb_state) {
 
         // ---- ヘッダ待ち ----
         case 0:
-            if (b == 0x01) usb_state = 1;
+            if (b == 0xF0) {
+                usb_state = 100;
+            }
+            else if (b == 0x01) usb_state = 1;
             else if (b == 0x02) usb_state = 3;
             else if (b >= 0x20 && b <= 0x26) {
                 usb_state = 10;
@@ -2863,6 +2866,13 @@ void processUSBSerial() {
         
             case 10:  // PC Status payload
             applyPCStatus(lastCmd, b);
+            usb_state = 0;
+            break;
+        
+        case 100:
+            if (b == 0x00) {
+                sendDeviceId();
+            }
             usb_state = 0;
             break;
 
@@ -3224,7 +3234,7 @@ void setup() {
     delay(200);
     sendDeviceId();
     deviceIdSent = true;
-    Serial.println("M5Core2 Typing Meter");
+    // Serial.println("M5Core2 Typing Meter");
 
     // ★ 起動時モード選択
     selectAppMode();
@@ -3238,7 +3248,7 @@ void setup() {
 
     if (appMode == MODE_USB_BT) {
         SerialBT.begin("TypingBridge"); // 任意の名前
-        Serial.println("Mode: USB/BT (Serial + BT)");
+        // Serial.println("Mode: USB/BT (Serial + BT)");
     }
 
     if (appMode == MODE_DEMO) {
@@ -3264,7 +3274,7 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(btnA_pin), btnA_ISR, FALLING);
     attachInterrupt(digitalPinToInterrupt(btnB_pin), btnB_ISR, FALLING);
 
-    Serial.println("M5Core2 Meter Ready");
+    // Serial.println("M5Core2 Meter Ready");
     
     // 記録された色インデックスを読み出し
     colorIndex = prefs.getInt("meterColorIdx", 0);
@@ -3299,10 +3309,7 @@ void loop() {
     M5.update();
     updatePomodoro();
     updateBatteryStatus();
-    updateBatteryUI();
-    if (appMode == MODE_USB_BT) {
-    processHello();
-    }     
+    updateBatteryUI();    
 
     if (!screenSaverActive) {
         drawBatteryIndicator();
@@ -3403,7 +3410,7 @@ if (newLayerReceived >= 0) {
         // 描画
         currentLayer = newLayerReceived;
         setActiveLayer(currentLayer);  // ← ここに統合！
-        Serial.printf("[I2C] Layer=%d\n", currentLayer);
+        // Serial.printf("[I2C] Layer=%d\n", currentLayer);
         drawShiftIndicator(); 
         }
     }
