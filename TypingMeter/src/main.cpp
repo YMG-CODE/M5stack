@@ -1,11 +1,14 @@
 
 #include <M5Unified.h>
 #define M5_Lcd M5.Display  // Legacy alias for M5Core2 compatibility
+#include <M5UnitGLASS2.h>
 #include <Wire.h>
 #include <math.h>
 #include <Preferences.h>
 
 #include <BluetoothSerial.h>
+
+M5UnitGLASS2 glass;
 // ==== USB/BT Connection Flags ====
 bool btConnected = false;   // セントラルがいれば true
 bool usbActive   = false;   // 今フレームで USB Serial に何か来たら true
@@ -158,6 +161,149 @@ DisplayMode prevDisplayMode = MODE_METER;
 
 bool hudMirror = false;//ヘッドアップディスプレイ用ミラーモード
 
+// =====================================================
+// GLASS2 表示モード
+// =====================================================
+enum GlassDisplayMode : uint8_t {
+    GLASS_MODE_PC_MONITOR = 0,
+    GLASS_MODE_RETICLE    = 1
+};
+
+// 起動時は現在の仕様どおりPC MONITOR
+GlassDisplayMode glassDisplayMode = GLASS_MODE_PC_MONITOR;
+
+// PC MONITORの初回描画フラグ
+bool glassPcFirstDraw = true;
+
+// レティクル初回描画フラグ
+bool glassReticleFirstDraw = true;
+
+// タッチ連打防止
+unsigned long lastGlassModeTouchMs = 0;
+
+
+constexpr unsigned long GLASS_UPDATE_MS = 500;
+static unsigned long lastGlassUpdateMs = 0;
+
+static uint8_t lastGlassCpu = 255;
+static uint8_t lastGlassRam = 255;
+static uint8_t lastGlassDisk = 255;
+static float lastGlassDiskR = -1.0f;
+static float lastGlassDiskW = -1.0f;
+
+extern uint8_t pc_cpu;
+extern uint8_t pc_ram;
+extern uint8_t pc_disk;
+extern float pc_disk_r_mbps;
+extern float pc_disk_w_mbps;
+
+void drawGlassBar(const char* label, int value, int x, int y, int w, int h) {
+    glass.fillRect(x - 24, y, w + 30, h + 2, TFT_BLACK);
+    glass.drawRect(x, y, w, h, TFT_DARKGREY);
+    int fillW = map(constrain(value, 0, 100), 0, 100, 0, w - 2);
+    if (fillW > 0) {
+        uint16_t col = (value >= 90) ? TFT_RED : (value >= 70) ? TFT_YELLOW : TFT_GREEN;
+        glass.fillRect(x + 1, y + 1, fillW, h - 2, col);
+    }
+    glass.setTextSize(1);
+    glass.setTextColor(TFT_WHITE);
+    glass.setCursor(x - 22, y + 1);
+    glass.print(label);
+
+    glass.fillRect(x + w + 1, y + 1, 18, 8, TFT_BLACK);
+    glass.setCursor(x + w + 1, y + 1);
+    glass.printf("%d", value);
+}
+
+void drawGlassPCMonitor() {
+
+    if (glassPcFirstDraw) {
+        glass.clear();
+
+        glass.setTextSize(1);
+        glass.setTextColor(TFT_WHITE);
+        glass.setCursor(4, 2);
+        glass.print("PC MONITOR");
+
+        glass.drawLine(4, 12, 123, 12, TFT_DARKGREY);
+
+        // モード切替直後は全項目を強制再描画
+        lastGlassCpu   = 255;
+        lastGlassRam   = 255;
+        lastGlassDisk  = 255;
+        lastGlassDiskR = -1.0f;
+        lastGlassDiskW = -1.0f;
+
+        glassPcFirstDraw = false;
+    }
+
+    bool changed = (lastGlassCpu != pc_cpu) ||
+                   (lastGlassRam != pc_ram) ||
+                   (lastGlassDisk != pc_disk) ||
+                   (fabs(lastGlassDiskR - pc_disk_r_mbps) > 0.05f) ||
+                   (fabs(lastGlassDiskW - pc_disk_w_mbps) > 0.05f);
+
+    if (!changed) {
+        return;
+    }
+
+    drawGlassBar("CPU", pc_cpu, 18, 16, 90, 7);
+    drawGlassBar("RAM", pc_ram, 18, 28, 90, 7);
+    drawGlassBar("D", pc_disk, 18, 40, 90, 7);
+
+    glass.fillRect(4, 52, 120, 10, TFT_BLACK);
+    glass.setTextColor(TFT_CYAN);
+    glass.setCursor(4, 52);
+    glass.printf("R:%4.1f", pc_disk_r_mbps);
+    glass.setCursor(70, 52);
+    glass.printf("W:%4.1f", pc_disk_w_mbps);
+
+    lastGlassCpu = pc_cpu;
+    lastGlassRam = pc_ram;
+    lastGlassDisk = pc_disk;
+    lastGlassDiskR = pc_disk_r_mbps;
+    lastGlassDiskW = pc_disk_w_mbps;
+
+    glass.display();
+}
+
+
+
+
+// =====================================================
+// GLASS2 表示モード切替
+// =====================================================
+void setGlassDisplayMode(GlassDisplayMode newMode) {
+
+    if (glassDisplayMode == newMode) {
+        return;
+    }
+
+    glassDisplayMode = newMode;
+
+    // GLASS2を一度消去
+    glass.clear();
+    glass.display();
+
+    // 各モードを次回強制初期描画
+    glassPcFirstDraw      = true;
+    glassReticleFirstDraw = true;
+
+    // 即時描画させる
+    lastGlassUpdateMs = 0;
+}
+
+
+void toggleGlassDisplayMode() {
+
+    if (glassDisplayMode == GLASS_MODE_PC_MONITOR) {
+        setGlassDisplayMode(GLASS_MODE_RETICLE);
+    } else {
+        setGlassDisplayMode(GLASS_MODE_PC_MONITOR);
+    }
+}
+
+
 // ==== ユーティリティ ====
 inline int valueToAngle(int value) {
     return map(value, 0, VALUE_MAX, -120, 120);
@@ -178,6 +324,299 @@ const int LAYER_BASE_Y = 45;
 const uint16_t LAYER_ON_COLOR = TFT_CYAN; 
 const uint16_t LAYER_OFF_COLOR = TFT_DARKGREY;
 int activeLayer = 0;  // 現在アクティブなレイヤー番号
+
+// =====================================================
+// GLASS2 レティクル表示：追尾強化 + 手前→奥 星空
+// =====================================================
+void drawGlassReticle() {
+
+    constexpr int GLASS_W = 128;
+    constexpr int GLASS_H = 64;
+
+    // レティクルの基準位置：少し右寄せ
+    constexpr int BASE_X = 88;
+    constexpr int BASE_Y = 32;
+
+    // 星空の消失点：奥へ吸い込まれる先
+    constexpr int VANISH_X = 92;
+    constexpr int VANISH_Y = 32;
+
+    // 星の数
+    constexpr int STAR_COUNT = 28;
+
+    static float reticleX = BASE_X;
+    static float reticleY = BASE_Y;
+
+    static float targetX = BASE_X;
+    static float targetY = BASE_Y;
+
+    static float starDirX[STAR_COUNT];
+    static float starDirY[STAR_COUNT];
+    static float starDepth[STAR_COUNT];
+
+    static bool starInitialized = false;
+
+    static unsigned long lastTargetMs = 0;
+    static unsigned long lastFrameMs  = 0;
+
+    unsigned long now = millis();
+
+    // -------------------------------------------------
+    // 初回初期化
+    // -------------------------------------------------
+    if (glassReticleFirstDraw || !starInitialized) {
+
+        glass.clear();
+
+        reticleX = BASE_X;
+        reticleY = BASE_Y;
+        targetX  = BASE_X;
+        targetY  = BASE_Y;
+
+        for (int i = 0; i < STAR_COUNT; i++) {
+
+            // 画面外側方向のランダムベクトル
+            float angle = random(0, 6283) / 1000.0f;  // 0〜2π
+            float radius = random(34, 78);
+
+            starDirX[i] = cos(angle) * radius;
+            starDirY[i] = sin(angle) * radius * 0.55f;
+
+            // 0.0 = 手前、1.0 = 奥
+            starDepth[i] = random(0, 1000) / 1000.0f;
+        }
+
+        starInitialized = true;
+        glassReticleFirstDraw = false;
+
+        lastTargetMs = now;
+        lastFrameMs  = now;
+    }
+
+    // -------------------------------------------------
+    // フレーム時間
+    // -------------------------------------------------
+    float dt = (now - lastFrameMs) / 16.0f;
+    if (dt < 0.1f) dt = 0.1f;
+    if (dt > 3.0f) dt = 3.0f;
+    lastFrameMs = now;
+
+    int cpmClamped = constrain((int)currentCPM, 0, 1200);
+
+    // CPMが高いほど、レティクルも星も少し活発にする
+    float activity = cpmClamped / 1200.0f;
+
+    // -------------------------------------------------
+    // 追尾目標点を大きめに動かす
+    // -------------------------------------------------
+
+    // ゆっくりした大きな揺れ
+    float t = now * 0.001f;
+
+    float ampX = 14.0f + activity * 12.0f;
+    float ampY =  7.0f + activity *  7.0f;
+
+    float orbitX =
+        sin(t * 1.25f) * ampX +
+        sin(t * 2.10f) * 5.0f;
+
+    float orbitY =
+        cos(t * 1.05f) * ampY +
+        sin(t * 1.70f) * 4.0f;
+
+    // ときどき微妙に目標をずらす
+    static float randomOffsetX = 0;
+    static float randomOffsetY = 0;
+
+    if (now - lastTargetMs >= 700) {
+        lastTargetMs = now;
+
+        randomOffsetX = random(-6, 7) * (0.5f + activity);
+        randomOffsetY = random(-4, 5) * (0.5f + activity);
+    }
+
+    targetX = BASE_X + orbitX + randomOffsetX;
+    targetY = BASE_Y + orbitY + randomOffsetY;
+
+    targetX = constrain(targetX, 56.0f, 116.0f);
+    targetY = constrain(targetY, 14.0f,  50.0f);
+
+    // -------------------------------------------------
+    // レティクル本体が目標点を追尾
+    // 数値を小さくするとヌルッと遅れる
+    // 数値を大きくすると機敏に追う
+    // -------------------------------------------------
+    const float FOLLOW = 0.055f;
+
+    reticleX += (targetX - reticleX) * FOLLOW * dt;
+    reticleY += (targetY - reticleY) * FOLLOW * dt;
+
+    int cx = round(reticleX);
+    int cy = round(reticleY);
+
+    // -------------------------------------------------
+    // 描画開始
+    // -------------------------------------------------
+    glass.clear();
+
+    // -------------------------------------------------
+    // 左側情報
+    // -------------------------------------------------
+    glass.setTextSize(1);
+
+    glass.setTextColor(TFT_CYAN);
+    glass.setCursor(2, 3);
+    glass.printf("L%d", activeLayer);
+
+    glass.setTextColor(TFT_WHITE);
+    glass.setCursor(2, 16);
+    glass.printf("%4d", currentCPM);
+
+    glass.setTextColor(TFT_DARKGREY);
+    glass.setCursor(2, 28);
+    glass.print("CPM");
+
+    glass.setTextColor(TFT_CYAN);
+    glass.setCursor(2, 50);
+    glass.print("[SCR]");
+
+    // -------------------------------------------------
+    // 星空：手前 → 奥
+    // 奥の消失点へ吸い込まれる
+    // -------------------------------------------------
+    float starSpeed = 0.018f + activity * 0.026f;
+
+    for (int i = 0; i < STAR_COUNT; i++) {
+
+        float prevDepth = starDepth[i];
+
+        // depth が増えるほど奥へ進む
+        starDepth[i] += starSpeed * dt * (0.7f + (i % 5) * 0.12f);
+
+        if (starDepth[i] >= 1.0f) {
+
+            float angle = random(0, 6283) / 1000.0f;
+            float radius = random(38, 82);
+
+            starDirX[i] = cos(angle) * radius;
+            starDirY[i] = sin(angle) * radius * 0.55f;
+
+            starDepth[i] = 0.0f;
+            prevDepth = 0.0f;
+        }
+
+        // scale: 1.0 = 手前で大きい / 0.0 = 奥で小さい
+        float scaleNow  = 1.0f - starDepth[i];
+        float scalePrev = 1.0f - prevDepth;
+
+        int xNow = VANISH_X + starDirX[i] * scaleNow;
+        int yNow = VANISH_Y + starDirY[i] * scaleNow;
+
+        int xPrev = VANISH_X + starDirX[i] * scalePrev;
+        int yPrev = VANISH_Y + starDirY[i] * scalePrev;
+
+        // 左側の情報欄を汚さない
+        if (xNow < 34 || xNow >= GLASS_W || yNow < 0 || yNow >= GLASS_H) {
+            continue;
+        }
+
+        // 手前ほど明るく、奥ほど暗い
+        uint16_t starColor =
+            (scaleNow > 0.72f) ? TFT_WHITE :
+            (scaleNow > 0.42f) ? TFT_CYAN :
+                                 TFT_DARKGREY;
+
+        // 手前の星だけ少し大きく
+        if (scaleNow > 0.82f) {
+            glass.fillCircle(xNow, yNow, 1, starColor);
+        } else {
+            glass.drawPixel(xNow, yNow, starColor);
+        }
+
+        // 手前→奥の流れが分かる短い軌跡
+        if (scaleNow > 0.35f) {
+            glass.drawLine(xPrev, yPrev, xNow, yNow, TFT_DARKGREY);
+        }
+    }
+
+    // -------------------------------------------------
+    // 追尾対象マーカー：薄く表示
+    // これがあると「レティクルが追っている」感じが出る
+    // -------------------------------------------------
+    int tx = round(targetX);
+    int ty = round(targetY);
+
+    glass.drawPixel(tx - 3, ty, TFT_DARKGREY);
+    glass.drawPixel(tx + 3, ty, TFT_DARKGREY);
+    glass.drawPixel(tx, ty - 3, TFT_DARKGREY);
+    glass.drawPixel(tx, ty + 3, TFT_DARKGREY);
+
+    // -------------------------------------------------
+    // レティクル本体：小さめ外周 + ロックオン収束リング
+    // -------------------------------------------------
+
+    // 固定レティクルのサイズ
+    const int OUTER_R = 13;   // ← 外周円。前回17 → 13に縮小
+    const int INNER_R = 5;    // ← 内周円。前回6 → 5に少し縮小
+
+    // -------------------------------------------------
+    // ロックオン収束リング
+    // 0.0 → 1.0 を繰り返し、外側から内側へ縮む
+    // -------------------------------------------------
+    float lockPhase = fmod(t * 1.25f, 1.0f);   // 数字を上げると収束が速い
+
+    int LOCK_START_R = 25;   // 開始半径：外側
+    int LOCK_END_R   = 14;   // 終了半径：固定外周の少し外
+
+    int lockR = LOCK_START_R - (int)((LOCK_START_R - LOCK_END_R) * lockPhase);
+
+    // 終盤だけ色を明るくすると「捕捉」感が出る
+    uint16_t lockColor =
+        (lockPhase > 0.72f) ? TFT_WHITE :
+        (lockPhase > 0.42f) ? TFT_CYAN :
+                            TFT_DARKGREY;
+
+    // 縮む円
+    glass.drawCircle(cx, cy, lockR, lockColor);
+
+    // 収束リングの四隅マーカー
+    // 円が縮む動きに合わせて角マーカーも寄ってくる
+    int lockCorner = lockR + 2;
+
+    glass.drawPixel(cx - lockCorner, cy - lockCorner, lockColor);
+    glass.drawPixel(cx + lockCorner, cy - lockCorner, lockColor);
+    glass.drawPixel(cx - lockCorner, cy + lockCorner, lockColor);
+    glass.drawPixel(cx + lockCorner, cy + lockCorner, lockColor);
+
+    // -------------------------------------------------
+    // 固定レティクル
+    // -------------------------------------------------
+
+    // 外周リング：小さめ実線
+    glass.drawCircle(cx, cy, OUTER_R, TFT_CYAN);
+
+    // 内周リング：小さい実線円
+    glass.drawCircle(cx, cy, INNER_R, TFT_WHITE);
+
+    // 短い十字線：外周が小さくなったので少し短縮
+    glass.drawLine(cx - 10, cy, cx - 6, cy, TFT_WHITE);
+    glass.drawLine(cx + 6,  cy, cx + 10, cy, TFT_WHITE);
+    glass.drawLine(cx, cy - 10, cx, cy - 6,  TFT_WHITE);
+    glass.drawLine(cx, cy + 6,  cx, cy + 10, TFT_WHITE);
+
+    // 中心点
+    glass.fillCircle(cx, cy, 1, TFT_WHITE);
+
+    // -------------------------------------------------
+    // ロックオン角マーカー：固定外周より外側で軽く脈動
+    // -------------------------------------------------
+    int pulse = 17 + (int)(sin(t * 5.0f) * 2.0f);
+
+    glass.drawPixel(cx - pulse, cy - pulse, TFT_CYAN);
+    glass.drawPixel(cx + pulse, cy - pulse, TFT_CYAN);
+    glass.drawPixel(cx - pulse, cy + pulse, TFT_CYAN);
+    glass.drawPixel(cx + pulse, cy + pulse, TFT_CYAN);
+}
 
 // ==== ⛽ ポモドーロ関連 ====
 bool pomodoroActive = false;
@@ -3230,6 +3669,16 @@ void setup() {
     //画面輝度最大
     M5.Lcd.setBrightness(255);
 
+    Wire.begin(32, 33);
+    glass.begin();
+    glass.clear();
+
+    // GLASS2初期状態
+    glassDisplayMode       = GLASS_MODE_PC_MONITOR;
+    glassPcFirstDraw       = true;
+    glassReticleFirstDraw  = true;
+    lastGlassUpdateMs      = 0;
+
     Serial.begin(115200);
     delay(200);
     sendDeviceId();
@@ -3307,9 +3756,42 @@ void setup() {
 // ==== メインループ ====
 void loop() {
     M5.update();
+
+
+    // =================================================
+    // Core2タッチでGLASS2モード切替
+    //
+    // 画面上部中央：
+    // X = 130～190
+    // Y = 0～45
+    //
+    // 既存のA/B/Cボタン機能は変更しない
+    // =================================================
+    if (M5.Touch.getCount() > 0) {
+
+        auto touch = M5.Touch.getDetail(0);
+
+        if (touch.wasPressed()) {
+
+            if (touch.x >= 130 && touch.x <= 190 &&
+                touch.y >=   0 && touch.y <= 45) {
+
+                // タッチ連打防止
+                if (millis() - lastGlassModeTouchMs >= 500) {
+
+                    lastGlassModeTouchMs = millis();
+                    toggleGlassDisplayMode();
+
+                    // 操作扱いとしてスクリーンセーバー時間も更新
+                    lastActivityTime = millis();
+                }
+            }
+        }
+    }
+
     updatePomodoro();
     updateBatteryStatus();
-    updateBatteryUI();    
+    updateBatteryUI();   
 
     if (!screenSaverActive) {
         drawBatteryIndicator();
@@ -3349,6 +3831,25 @@ if (prevSource != activeSource) {
     } else {
         // 未接続 / I2C / Demo → 消灯
         M5.Power.setLed(false);
+    }
+}
+
+// =====================================================
+// GLASS2 表示更新
+// =====================================================
+unsigned long glassInterval =
+    (glassDisplayMode == GLASS_MODE_RETICLE)
+        ? 33UL       // レティクル：約30fps
+        : GLASS_UPDATE_MS; // PC MONITOR：既存の500ms
+
+if (millis() - lastGlassUpdateMs >= glassInterval) {
+
+    lastGlassUpdateMs = millis();
+
+    if (glassDisplayMode == GLASS_MODE_PC_MONITOR) {
+        drawGlassPCMonitor();
+    } else {
+        drawGlassReticle();
     }
 }
 
@@ -3624,7 +4125,7 @@ if (touchPressed && (touchX > 80 && touchX < 240 && touchY > 80 && touchY < 200)
         M5.Display.setTextDatum(TL_DATUM);
         M5.Display.setTextColor(TFT_WHITE, BLACK);
         M5.Display.drawString(
-            String("screenSaverMode: ") + (screenSaverMode ? "ON" : "OFF"),
+            screenSaverMode ? "screenSaverMode: ON" : "screenSaverMode: OFF",
             10, 5, 2
         );
 
