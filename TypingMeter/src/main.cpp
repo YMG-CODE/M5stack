@@ -9,6 +9,55 @@
 #include <BluetoothSerial.h>
 
 M5UnitGLASS2 glass;
+M5Canvas glassCanvas(&glass);
+
+static volatile int16_t hudMouseDx = 0;
+static volatile int16_t hudMouseDy = 0;
+static unsigned long lastHudMouseMs = 0;
+
+
+// =====================================================
+// GLASS2 HUD入力状態
+// =====================================================
+
+enum HudInputMode : uint8_t {
+    HUD_INPUT_CURSOR = 0,
+    HUD_INPUT_SCROLL = 1
+};
+
+static HudInputMode hudInputMode = HUD_INPUT_CURSOR;
+
+// スクロール入力蓄積
+static volatile int16_t hudScrollDelta = 0;
+
+
+
+// 入力時刻
+static unsigned long lastHudScrollMs = 0;
+static unsigned long lastHudClickMs  = 0;
+
+// クリックエフェクト
+static bool hudLockOnActive = false;
+static uint8_t hudLastButton = 0;
+
+// ボタン番号
+constexpr uint8_t HUD_BUTTON_LEFT   = 1;
+constexpr uint8_t HUD_BUTTON_RIGHT  = 2;
+constexpr uint8_t HUD_BUTTON_MIDDLE = 3;
+
+// ロックオン収束アニメーション時間
+constexpr unsigned long HUD_LOCK_ANIM_MS = 450;
+
+// 収束後にLOCK状態を維持する時間
+constexpr unsigned long HUD_LOCK_HOLD_MS = 1700;
+
+// ロックオン全体の表示時間
+constexpr unsigned long HUD_LOCK_ON_DURATION_MS =
+    HUD_LOCK_ANIM_MS + HUD_LOCK_HOLD_MS;
+
+constexpr unsigned long HUD_MODE_HOLD_MS = 500;
+
+
 // ==== USB/BT Connection Flags ====
 bool btConnected = false;   // セントラルがいれば true
 bool usbActive   = false;   // 今フレームで USB Serial に何か来たら true
@@ -184,6 +233,9 @@ unsigned long lastGlassModeTouchMs = 0;
 
 constexpr unsigned long GLASS_UPDATE_MS = 500;
 static unsigned long lastGlassUpdateMs = 0;
+// レティクルは全面転送なので更新頻度を制限
+constexpr unsigned long GLASS_RETICLE_UPDATE_MS = 63;  // 約15 FPS
+static unsigned long lastGlassReticleUpdateMs = 0;
 
 static uint8_t lastGlassCpu = 255;
 static uint8_t lastGlassRam = 255;
@@ -268,8 +320,6 @@ void drawGlassPCMonitor() {
 }
 
 
-
-
 // =====================================================
 // GLASS2 表示モード切替
 // =====================================================
@@ -289,8 +339,9 @@ void setGlassDisplayMode(GlassDisplayMode newMode) {
     glassPcFirstDraw      = true;
     glassReticleFirstDraw = true;
 
-    // 即時描画させる
+    // モード切替直後は即時描画
     lastGlassUpdateMs = 0;
+    lastGlassReticleUpdateMs = 0;
 }
 
 
@@ -330,6 +381,16 @@ int activeLayer = 0;  // 現在アクティブなレイヤー番号
 // =====================================================
 void drawGlassReticle() {
 
+    unsigned long frameNow = millis();
+
+    // GLASS2の全面転送を約15FPSに制限
+    if (frameNow - lastGlassReticleUpdateMs < GLASS_RETICLE_UPDATE_MS) {
+        return;
+    }
+
+    // 今回のフレームを受け付ける
+    lastGlassReticleUpdateMs = frameNow;
+
     constexpr int GLASS_W = 128;
     constexpr int GLASS_H = 64;
 
@@ -356,17 +417,14 @@ void drawGlassReticle() {
 
     static bool starInitialized = false;
 
-    static unsigned long lastTargetMs = 0;
     static unsigned long lastFrameMs  = 0;
 
-    unsigned long now = millis();
+    unsigned long now = frameNow;
 
     // -------------------------------------------------
     // 初回初期化
     // -------------------------------------------------
     if (glassReticleFirstDraw || !starInitialized) {
-
-        glass.clear();
 
         reticleX = BASE_X;
         reticleY = BASE_Y;
@@ -389,7 +447,6 @@ void drawGlassReticle() {
         starInitialized = true;
         glassReticleFirstDraw = false;
 
-        lastTargetMs = now;
         lastFrameMs  = now;
     }
 
@@ -401,6 +458,15 @@ void drawGlassReticle() {
     if (dt > 3.0f) dt = 3.0f;
     lastFrameMs = now;
 
+    float t = now * 0.001f;
+
+    // スクロール終了後はCSRへ戻す
+    if (hudInputMode == HUD_INPUT_SCROLL &&
+        now - lastHudScrollMs > HUD_MODE_HOLD_MS) {
+
+        hudInputMode = HUD_INPUT_CURSOR;
+    }
+
     int cpmClamped = constrain((int)currentCPM, 0, 1200);
 
     // CPMが高いほど、レティクルも星も少し活発にする
@@ -410,43 +476,62 @@ void drawGlassReticle() {
     // 追尾目標点を大きめに動かす
     // -------------------------------------------------
 
-    // ゆっくりした大きな揺れ
-    float t = now * 0.001f;
+    // -------------------------------------------------
+    // マウス・スクロール入力をローカル変数へ移す
+    // -------------------------------------------------
+    int16_t localDx = hudMouseDx;
+    int16_t localDy = hudMouseDy;
+    int16_t localScroll = hudScrollDelta;
 
-    float ampX = 14.0f + activity * 12.0f;
-    float ampY =  7.0f + activity *  7.0f;
+    // 今回の描画フレームで受信値を消費する
+    hudMouseDx = 0;
+    hudMouseDy = 0;
+    hudScrollDelta = 0;
 
-    float orbitX =
-        sin(t * 1.25f) * ampX +
-        sin(t * 2.10f) * 5.0f;
+    // -------------------------------------------------
+    // マウス移動をレティクル目標位置へ反映
+    // -------------------------------------------------
+    constexpr float MOUSE_GAIN_X = 0.24f;
+    constexpr float MOUSE_GAIN_Y = 0.20f;
 
-    float orbitY =
-        cos(t * 1.05f) * ampY +
-        sin(t * 1.70f) * 4.0f;
+    targetX += localDx * MOUSE_GAIN_X;
+    targetY += localDy * MOUSE_GAIN_Y;
 
-    // ときどき微妙に目標をずらす
-    static float randomOffsetX = 0;
-    static float randomOffsetY = 0;
+    // -------------------------------------------------
+    // スクロール入力を上下方向のキックとして反映
+    // -------------------------------------------------
+    if (localScroll != 0) {
 
-    if (now - lastTargetMs >= 700) {
-        lastTargetMs = now;
+        // 大きくするとスクロール時の上下移動が大きくなる
+        constexpr float SCROLL_KICK = 1.2f;
 
-        randomOffsetX = random(-6, 7) * (0.5f + activity);
-        randomOffsetY = random(-4, 5) * (0.5f + activity);
+        // 正のホイール値で上方向へ動かす
+        targetY -= localScroll * SCROLL_KICK;
     }
 
-    targetX = BASE_X + orbitX + randomOffsetX;
-    targetY = BASE_Y + orbitY + randomOffsetY;
-
+    // -------------------------------------------------
+    // レティクルの移動可能範囲
+    // -------------------------------------------------
     targetX = constrain(targetX, 56.0f, 116.0f);
-    targetY = constrain(targetY, 14.0f,  50.0f);
+    targetY = constrain(targetY, 14.0f, 50.0f);
+
+    // -------------------------------------------------
+    // マウス停止後はゆっくり中央へ復帰
+    // -------------------------------------------------
+    constexpr unsigned long RETURN_DELAY_MS = 100;
+    constexpr float RETURN_RATE = 0.08f;
+
+    if (now - lastHudMouseMs > RETURN_DELAY_MS) {
+        targetX += (BASE_X - targetX) * RETURN_RATE * dt;
+        targetY += (BASE_Y - targetY) * RETURN_RATE * dt;
+    }
 
     // -------------------------------------------------
     // レティクル本体が目標点を追尾
     // 数値を小さくするとヌルッと遅れる
     // 数値を大きくすると機敏に追う
     // -------------------------------------------------
-    const float FOLLOW = 0.055f;
+    const float FOLLOW = 0.12f;
 
     reticleX += (targetX - reticleX) * FOLLOW * dt;
     reticleY += (targetY - reticleY) * FOLLOW * dt;
@@ -455,30 +540,36 @@ void drawGlassReticle() {
     int cy = round(reticleY);
 
     // -------------------------------------------------
-    // 描画開始
+    // RAM上のCanvasへ描画開始
     // -------------------------------------------------
-    glass.clear();
+    glassCanvas.fillScreen(TFT_BLACK);
 
     // -------------------------------------------------
     // 左側情報
     // -------------------------------------------------
-    glass.setTextSize(1);
+    glassCanvas.setTextSize(1);
 
-    glass.setTextColor(TFT_CYAN);
-    glass.setCursor(2, 3);
-    glass.printf("L%d", activeLayer);
+    glassCanvas.setTextColor(TFT_CYAN);
+    glassCanvas.setCursor(2, 3);
+    glassCanvas.printf("L%d", activeLayer);
 
-    glass.setTextColor(TFT_WHITE);
-    glass.setCursor(2, 16);
-    glass.printf("%4d", currentCPM);
+    glassCanvas.setTextColor(TFT_WHITE);
+    glassCanvas.setCursor(2, 16);
+    glassCanvas.printf("%4d", currentCPM);
 
-    glass.setTextColor(TFT_DARKGREY);
-    glass.setCursor(2, 28);
-    glass.print("CPM");
+    glassCanvas.setTextColor(TFT_DARKGREY);
+    glassCanvas.setCursor(2, 28);
+    glassCanvas.print("CPM");
 
-    glass.setTextColor(TFT_CYAN);
-    glass.setCursor(2, 50);
-    glass.print("[SCR]");
+    glassCanvas.setCursor(2, 50);
+
+    if (hudInputMode == HUD_INPUT_SCROLL) {
+        glassCanvas.setTextColor(TFT_YELLOW);
+        glassCanvas.print("[SCR]");
+    } else {
+        glassCanvas.setTextColor(TFT_CYAN);
+        glassCanvas.print("[CSR]");
+    }
 
     // -------------------------------------------------
     // 星空：手前 → 奥
@@ -528,15 +619,30 @@ void drawGlassReticle() {
 
         // 手前の星だけ少し大きく
         if (scaleNow > 0.82f) {
-            glass.fillCircle(xNow, yNow, 1, starColor);
+        glassCanvas.fillCircle(xNow, yNow, 1, starColor);
         } else {
-            glass.drawPixel(xNow, yNow, starColor);
+            glassCanvas.drawPixel(xNow, yNow, starColor);
         }
 
         // 手前→奥の流れが分かる短い軌跡
         if (scaleNow > 0.35f) {
-            glass.drawLine(xPrev, yPrev, xNow, yNow, TFT_DARKGREY);
+            glassCanvas.drawLine(xPrev, yPrev, xNow, yNow, TFT_DARKGREY);
         }
+
+    }
+
+    // -------------------------------------------------
+    // クリック後のロックオン状態を判定
+    // -------------------------------------------------
+    unsigned long clickElapsed = now - lastHudClickMs;
+
+    bool lockOn =
+        hudLockOnActive &&
+        clickElapsed < HUD_LOCK_ON_DURATION_MS;
+
+    // 規定時間を過ぎたらロックオン終了
+    if (!lockOn) {
+        hudLockOnActive = false;
     }
 
     // -------------------------------------------------
@@ -546,10 +652,12 @@ void drawGlassReticle() {
     int tx = round(targetX);
     int ty = round(targetY);
 
-    glass.drawPixel(tx - 3, ty, TFT_DARKGREY);
-    glass.drawPixel(tx + 3, ty, TFT_DARKGREY);
-    glass.drawPixel(tx, ty - 3, TFT_DARKGREY);
-    glass.drawPixel(tx, ty + 3, TFT_DARKGREY);
+    if (!lockOn) {
+        glassCanvas.drawPixel(tx - 3, ty, TFT_DARKGREY);
+        glassCanvas.drawPixel(tx + 3, ty, TFT_DARKGREY);
+        glassCanvas.drawPixel(tx, ty - 3, TFT_DARKGREY);
+        glassCanvas.drawPixel(tx, ty + 3, TFT_DARKGREY);
+    }
 
     // -------------------------------------------------
     // レティクル本体：小さめ外周 + ロックオン収束リング
@@ -559,63 +667,324 @@ void drawGlassReticle() {
     const int OUTER_R = 13;   // ← 外周円。前回17 → 13に縮小
     const int INNER_R = 5;    // ← 内周円。前回6 → 5に少し縮小
 
-    // -------------------------------------------------
-    // ロックオン収束リング
-    // 0.0 → 1.0 を繰り返し、外側から内側へ縮む
-    // -------------------------------------------------
-    float lockPhase = fmod(t * 1.25f, 1.0f);   // 数字を上げると収束が速い
-
-    int LOCK_START_R = 25;   // 開始半径：外側
-    int LOCK_END_R   = 14;   // 終了半径：固定外周の少し外
-
-    int lockR = LOCK_START_R - (int)((LOCK_START_R - LOCK_END_R) * lockPhase);
-
-    // 終盤だけ色を明るくすると「捕捉」感が出る
-    uint16_t lockColor =
-        (lockPhase > 0.72f) ? TFT_WHITE :
-        (lockPhase > 0.42f) ? TFT_CYAN :
-                            TFT_DARKGREY;
-
-    // 縮む円
-    glass.drawCircle(cx, cy, lockR, lockColor);
-
-    // 収束リングの四隅マーカー
-    // 円が縮む動きに合わせて角マーカーも寄ってくる
-    int lockCorner = lockR + 2;
-
-    glass.drawPixel(cx - lockCorner, cy - lockCorner, lockColor);
-    glass.drawPixel(cx + lockCorner, cy - lockCorner, lockColor);
-    glass.drawPixel(cx - lockCorner, cy + lockCorner, lockColor);
-    glass.drawPixel(cx + lockCorner, cy + lockCorner, lockColor);
+    // =================================================
+    // レティクル形状描画
+    // =================================================
 
     // -------------------------------------------------
-    // 固定レティクル
+    // 左クリック中：ロックオンモード
     // -------------------------------------------------
+    if (lockOn) {
 
-    // 外周リング：小さめ実線
-    glass.drawCircle(cx, cy, OUTER_R, TFT_CYAN);
+        float phase =
+            clickElapsed /
+            static_cast<float>(HUD_LOCK_ANIM_MS);
 
-    // 内周リング：小さい実線円
-    glass.drawCircle(cx, cy, INNER_R, TFT_WHITE);
+        phase = constrain(phase, 0.0f, 1.0f);
 
-    // 短い十字線：外周が小さくなったので少し短縮
-    glass.drawLine(cx - 10, cy, cx - 6, cy, TFT_WHITE);
-    glass.drawLine(cx + 6,  cy, cx + 10, cy, TFT_WHITE);
-    glass.drawLine(cx, cy - 10, cx, cy - 6,  TFT_WHITE);
-    glass.drawLine(cx, cy + 6,  cx, cy + 10, TFT_WHITE);
+        // 外側リングが中心へ収束
+        int lockOuterR =
+            28 - static_cast<int>(phase * 15.0f);
+
+        // 内側リングは少し広がる
+        int lockInnerR =
+            4 + static_cast<int>(phase * 4.0f);
+
+        uint16_t lockColor =
+            (phase < 0.55f)
+                ? TFT_CYAN
+                : TFT_WHITE;
+
+        // 収束する外側リング
+        glassCanvas.drawCircle(
+            cx,
+            cy,
+            lockOuterR,
+            lockColor
+        );
+
+        // 内側捕捉リング
+        glassCanvas.drawCircle(
+            cx,
+            cy,
+            lockInnerR,
+            TFT_WHITE
+        );
+
+        // 中心点
+        glassCanvas.fillCircle(
+            cx,
+            cy,
+            1,
+            TFT_WHITE
+        );
+
+        // ---------------------------------------------
+        // 四隅のロックオンブラケット
+        // ---------------------------------------------
+        int bracketR =
+            22 - static_cast<int>(phase * 7.0f);
+
+        constexpr int BRACKET_LEN = 5;
+
+        // 左上
+        glassCanvas.drawLine(
+            cx - bracketR,
+            cy - bracketR,
+            cx - bracketR + BRACKET_LEN,
+            cy - bracketR,
+            lockColor
+        );
+
+        glassCanvas.drawLine(
+            cx - bracketR,
+            cy - bracketR,
+            cx - bracketR,
+            cy - bracketR + BRACKET_LEN,
+            lockColor
+        );
+
+        // 右上
+        glassCanvas.drawLine(
+            cx + bracketR,
+            cy - bracketR,
+            cx + bracketR - BRACKET_LEN,
+            cy - bracketR,
+            lockColor
+        );
+
+        glassCanvas.drawLine(
+            cx + bracketR,
+            cy - bracketR,
+            cx + bracketR,
+            cy - bracketR + BRACKET_LEN,
+            lockColor
+        );
+
+        // 左下
+        glassCanvas.drawLine(
+            cx - bracketR,
+            cy + bracketR,
+            cx - bracketR + BRACKET_LEN,
+            cy + bracketR,
+            lockColor
+        );
+
+        glassCanvas.drawLine(
+            cx - bracketR,
+            cy + bracketR,
+            cx - bracketR,
+            cy + bracketR - BRACKET_LEN,
+            lockColor
+        );
+
+        // 右下
+        glassCanvas.drawLine(
+            cx + bracketR,
+            cy + bracketR,
+            cx + bracketR - BRACKET_LEN,
+            cy + bracketR,
+            lockColor
+        );
+
+        glassCanvas.drawLine(
+            cx + bracketR,
+            cy + bracketR,
+            cx + bracketR,
+            cy + bracketR - BRACKET_LEN,
+            lockColor
+        );
+
+        // 捕捉後半にLOCK表示
+        if (phase > 0.75f) {
+
+            int lockTextX =
+                constrain(cx - 10, 36, 104);
+
+            int lockTextY =
+                constrain(cy + 18, 0, 56);
+
+            glassCanvas.setTextSize(1);
+            glassCanvas.setTextColor(TFT_WHITE);
+            glassCanvas.setCursor(lockTextX, lockTextY);
+            glassCanvas.print("LOCK");
+        }
+    }
+
+// -------------------------------------------------
+// 通常カーソル／スクロールモード
+// -------------------------------------------------
+else {
+
+    // -------------------------------------------------
+    // 通常時の収束リング
+    // -------------------------------------------------
+    float normalRingPhase =
+        fmodf(t * 1.25f, 1.0f);
+
+    constexpr int NORMAL_RING_START_R = 25;
+    constexpr int NORMAL_RING_END_R   = 14;
+
+    int normalRingR =
+        NORMAL_RING_START_R -
+        static_cast<int>(
+            (NORMAL_RING_START_R - NORMAL_RING_END_R)
+            * normalRingPhase
+        );
+
+    uint16_t normalRingColor =
+        (normalRingPhase > 0.72f) ? TFT_WHITE :
+        (normalRingPhase > 0.42f) ? TFT_CYAN :
+                                    TFT_DARKGREY;
+
+    glassCanvas.drawCircle(
+        cx,
+        cy,
+        normalRingR,
+        normalRingColor
+    );
+
+    // -------------------------------------------------
+    // 固定外周リング
+    // -------------------------------------------------
+    glassCanvas.drawCircle(
+        cx,
+        cy,
+        OUTER_R,
+        TFT_CYAN
+    );
+
+    // -------------------------------------------------
+    // 固定内周リング
+    // -------------------------------------------------
+    glassCanvas.drawCircle(
+        cx,
+        cy,
+        INNER_R,
+        TFT_WHITE
+    );
+
+    // 十字線
+    glassCanvas.drawLine(
+        cx - 10,
+        cy,
+        cx - 6,
+        cy,
+        TFT_WHITE
+    );
+
+    glassCanvas.drawLine(
+        cx + 6,
+        cy,
+        cx + 10,
+        cy,
+        TFT_WHITE
+    );
+
+    glassCanvas.drawLine(
+        cx,
+        cy - 10,
+        cx,
+        cy - 6,
+        TFT_WHITE
+    );
+
+    glassCanvas.drawLine(
+        cx,
+        cy + 6,
+        cx,
+        cy + 10,
+        TFT_WHITE
+    );
 
     // 中心点
-    glass.fillCircle(cx, cy, 1, TFT_WHITE);
+    glassCanvas.fillCircle(
+        cx,
+        cy,
+        1,
+        TFT_WHITE
+    );
 
-    // -------------------------------------------------
-    // ロックオン角マーカー：固定外周より外側で軽く脈動
-    // -------------------------------------------------
-    int pulse = 17 + (int)(sin(t * 5.0f) * 2.0f);
+    // SCRモード専用矢印
+    if (hudInputMode == HUD_INPUT_SCROLL) {
 
-    glass.drawPixel(cx - pulse, cy - pulse, TFT_CYAN);
-    glass.drawPixel(cx + pulse, cy - pulse, TFT_CYAN);
-    glass.drawPixel(cx - pulse, cy + pulse, TFT_CYAN);
-    glass.drawPixel(cx + pulse, cy + pulse, TFT_CYAN);
+        constexpr int ARROW_DISTANCE = 20;
+        constexpr int ARROW_WIDTH = 3;
+
+        uint16_t scrollColor = TFT_YELLOW;
+
+        // 上矢印
+        glassCanvas.drawLine(
+            cx,
+            cy - ARROW_DISTANCE,
+            cx - ARROW_WIDTH,
+            cy - ARROW_DISTANCE + 3,
+            scrollColor
+        );
+
+        glassCanvas.drawLine(
+            cx,
+            cy - ARROW_DISTANCE,
+            cx + ARROW_WIDTH,
+            cy - ARROW_DISTANCE + 3,
+            scrollColor
+        );
+
+        // 下矢印
+        glassCanvas.drawLine(
+            cx,
+            cy + ARROW_DISTANCE,
+            cx - ARROW_WIDTH,
+            cy + ARROW_DISTANCE - 3,
+            scrollColor
+        );
+
+        glassCanvas.drawLine(
+            cx,
+            cy + ARROW_DISTANCE,
+            cx + ARROW_WIDTH,
+            cy + ARROW_DISTANCE - 3,
+            scrollColor
+        );
+    }
+
+    // 四隅の脈動点
+    int pulse =
+        17 + static_cast<int>(sin(t * 5.0f) * 2.0f);
+
+    uint16_t pulseColor =
+        (hudInputMode == HUD_INPUT_SCROLL)
+            ? TFT_YELLOW
+            : TFT_CYAN;
+
+    glassCanvas.drawPixel(
+        cx - pulse,
+        cy - pulse,
+        pulseColor
+    );
+
+    glassCanvas.drawPixel(
+        cx + pulse,
+        cy - pulse,
+        pulseColor
+    );
+
+    glassCanvas.drawPixel(
+        cx - pulse,
+        cy + pulse,
+        pulseColor
+    );
+
+    glassCanvas.drawPixel(
+        cx + pulse,
+        cy + pulse,
+        pulseColor
+    );
+}
+
+    // 完成した1フレームを最後に一度だけ転送
+    glassCanvas.pushSprite(0, 0);
+
 }
 
 // ==== ⛽ ポモドーロ関連 ====
@@ -911,6 +1280,41 @@ void applyPCStatus(uint8_t cmd, uint8_t v) {
         case 0x25: pc_disk_r_mbps = v / 10.0f; break;
         case 0x26: pc_disk_w_mbps = v / 10.0f; break;
     }
+    // ここに追加
+
+}
+
+void applyHudMouseMotion(int8_t dx, int8_t dy) {
+
+    hudMouseDx += dx;
+    hudMouseDy += dy;
+
+    hudMouseDx = constrain(hudMouseDx, -120, 120);
+    hudMouseDy = constrain(hudMouseDy, -120, 120);
+
+    hudInputMode = HUD_INPUT_CURSOR;
+    lastHudMouseMs = millis();
+}
+
+void applyHudMouseClick(uint8_t button) {
+
+    hudLastButton = button;
+    lastHudClickMs = millis();
+
+    // 左クリックでロックオン開始
+    if (button == HUD_BUTTON_LEFT) {
+        hudLockOnActive = true;
+    }
+}
+
+
+void applyHudScroll(int8_t wheel) {
+
+    hudScrollDelta += wheel;
+    hudScrollDelta = constrain(hudScrollDelta, -40, 40);
+
+    hudInputMode = HUD_INPUT_SCROLL;
+    lastHudScrollMs = millis();
 }
 
 
@@ -3257,6 +3661,8 @@ static uint8_t usb_state = 0;
 static uint8_t usb_lsb   = 0;
 static uint8_t usb_msb   = 0;
 
+static int8_t usb_mouse_dx = 0;
+
 void processUSBSerial() {
 
     while (Serial.available() > 0) {
@@ -3271,8 +3677,24 @@ void processUSBSerial() {
             if (b == 0xF0) {
                 usb_state = 100;
             }
-            else if (b == 0x01) usb_state = 1;
-            else if (b == 0x02) usb_state = 3;
+            else if (b == 0x01) {
+                usb_state = 1;
+            }
+            else if (b == 0x02) {
+                usb_state = 3;
+            }
+            else if (b == 0x31) {
+                // dx, dy
+                usb_state = 20;
+            }
+            else if (b == 0x32) {
+                // button
+                usb_state = 22;
+            }
+            else if (b == 0x33) {
+                // wheel
+                usb_state = 23;
+            }
             else if (b >= 0x20 && b <= 0x26) {
                 usb_state = 10;
                 lastCmd = b;
@@ -3308,13 +3730,47 @@ void processUSBSerial() {
             usb_state = 0;
             break;
         
+case 20:
+    // マウスX
+    usb_mouse_dx = static_cast<int8_t>(b);
+    usb_state = 21;
+    break;
+
+        case 21:
+            // マウスY
+            {
+                int8_t usb_mouse_dy = static_cast<int8_t>(b);
+
+                applyHudMouseMotion(
+                    usb_mouse_dx,
+                    usb_mouse_dy
+                );
+            }
+            usb_state = 0;
+            break;
+
+        case 22:
+            // クリック
+            applyHudMouseClick(b);
+            usb_state = 0;
+            break;
+
+        case 23:
+            // スクロール
+            applyHudScroll(static_cast<int8_t>(b));
+            usb_state = 0;
+            break;
+        
         case 100:
             if (b == 0x00) {
                 sendDeviceId();
             }
             usb_state = 0;
             break;
-
+        
+        default:
+            usb_state = 0;
+            break;
         }
     }
 }
@@ -3349,6 +3805,34 @@ void processBTSerial() {
             if (!SerialBT.available()) return;
             uint8_t v = SerialBT.read();
             applyPCStatus(cmd, v);
+        }
+        
+        else if (cmd == 0x31) {
+            if (SerialBT.available() < 2) return;
+
+            int8_t dx =
+                static_cast<int8_t>(SerialBT.read());
+
+            int8_t dy =
+                static_cast<int8_t>(SerialBT.read());
+
+            applyHudMouseMotion(dx, dy);
+        }
+
+        else if (cmd == 0x32) {
+            if (SerialBT.available() < 1) return;
+
+            uint8_t button = SerialBT.read();
+            applyHudMouseClick(button);
+        }
+
+        else if (cmd == 0x33) {
+            if (SerialBT.available() < 1) return;
+
+            int8_t wheel =
+                static_cast<int8_t>(SerialBT.read());
+
+            applyHudScroll(wheel);
         }
     }
 }
@@ -3673,6 +4157,17 @@ void setup() {
     glass.begin();
     glass.clear();
 
+    glassCanvas.setColorDepth(16);
+
+    if (!glassCanvas.createSprite(128, 64)) {
+        Serial.println("GLASS2 canvas allocation failed");
+    }
+
+    glassCanvas.fillScreen(TFT_BLACK);
+    glassCanvas.pushSprite(0, 0);
+
+   
+
     // GLASS2初期状態
     glassDisplayMode       = GLASS_MODE_PC_MONITOR;
     glassPcFirstDraw       = true;
@@ -3837,10 +4332,12 @@ if (prevSource != activeSource) {
 // =====================================================
 // GLASS2 表示更新
 // =====================================================
+constexpr unsigned long GLASS_RETICLE_FRAME_MS = 20;
+
 unsigned long glassInterval =
     (glassDisplayMode == GLASS_MODE_RETICLE)
-        ? 33UL       // レティクル：約30fps
-        : GLASS_UPDATE_MS; // PC MONITOR：既存の500ms
+        ? GLASS_RETICLE_FRAME_MS
+        : GLASS_UPDATE_MS;
 
 if (millis() - lastGlassUpdateMs >= glassInterval) {
 
