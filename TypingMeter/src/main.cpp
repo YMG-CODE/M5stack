@@ -57,6 +57,14 @@ constexpr unsigned long HUD_LOCK_ON_DURATION_MS =
 
 constexpr unsigned long HUD_MODE_HOLD_MS = 500;
 
+// ロック確定後の点滅間隔
+constexpr unsigned long HUD_LOCK_BLINK_INTERVAL_MS = 80;
+
+// 点滅させる時間
+constexpr unsigned long HUD_LOCK_BLINK_DURATION_MS = 560;
+
+
+
 
 // ==== USB/BT Connection Flags ====
 bool btConnected = false;   // セントラルがいれば true
@@ -555,22 +563,17 @@ void drawGlassReticle() {
 
     glassCanvas.setTextColor(TFT_WHITE);
     glassCanvas.setCursor(2, 16);
-    glassCanvas.printf("%4d", currentCPM);
+    glassCanvas.printf("%d CPM", currentCPM);
 
-    glassCanvas.setTextColor(TFT_DARKGREY);
-    glassCanvas.setCursor(2, 28);
-    glassCanvas.print("CPM");
-
-    glassCanvas.setCursor(2, 50);
+    glassCanvas.setCursor(2, 30);
 
     if (hudInputMode == HUD_INPUT_SCROLL) {
         glassCanvas.setTextColor(TFT_YELLOW);
-        glassCanvas.print("[SCR]");
+        glassCanvas.print("SCR");
     } else {
         glassCanvas.setTextColor(TFT_CYAN);
-        glassCanvas.print("[CSR]");
+        glassCanvas.print("CSR");
     }
-
     // -------------------------------------------------
     // 星空：手前 → 奥
     // 奥の消失点へ吸い込まれる
@@ -676,13 +679,46 @@ void drawGlassReticle() {
     // -------------------------------------------------
     if (lockOn) {
 
+        // -------------------------------------------------
+        // 収束アニメーション進行度
+        // 0.0 → 1.0
+        // -------------------------------------------------
         float phase =
             clickElapsed /
             static_cast<float>(HUD_LOCK_ANIM_MS);
 
         phase = constrain(phase, 0.0f, 1.0f);
 
+        // -------------------------------------------------
+        // ロック確定後の経過時間
+        // -------------------------------------------------
+        unsigned long lockHoldElapsed = 0;
+
+        if (clickElapsed >= HUD_LOCK_ANIM_MS) {
+            lockHoldElapsed =
+                clickElapsed - HUD_LOCK_ANIM_MS;
+        }
+
+        // -------------------------------------------------
+        // 点滅判定
+        //
+        // 収束中      ：常時表示
+        // 収束後720ms ：ON/OFF点滅
+        // それ以降    ：常時表示
+        // -------------------------------------------------
+        bool lockReticleVisible = true;
+
+        if (clickElapsed >= HUD_LOCK_ANIM_MS &&
+            lockHoldElapsed < HUD_LOCK_BLINK_DURATION_MS) {
+
+            lockReticleVisible =
+                ((lockHoldElapsed /
+                HUD_LOCK_BLINK_INTERVAL_MS) % 2) == 0;
+        }
+
+        // -------------------------------------------------
         // 外側リングが中心へ収束
+        // -------------------------------------------------
         int lockOuterR =
             28 - static_cast<int>(phase * 15.0f);
 
@@ -690,113 +726,121 @@ void drawGlassReticle() {
         int lockInnerR =
             4 + static_cast<int>(phase * 4.0f);
 
-        uint16_t lockColor =
-            (phase < 0.55f)
-                ? TFT_CYAN
-                : TFT_WHITE;
+        // GLASS2は実質モノクロなので色差ではなく明滅で表現
+        uint16_t lockColor = TFT_WHITE;
 
-        // 収束する外側リング
-        glassCanvas.drawCircle(
-            cx,
-            cy,
-            lockOuterR,
-            lockColor
-        );
+        // -------------------------------------------------
+        // レティクル一式
+        // 点滅OFF中は描画しない
+        // -------------------------------------------------
+        if (lockReticleVisible) {
 
-        // 内側捕捉リング
-        glassCanvas.drawCircle(
-            cx,
-            cy,
-            lockInnerR,
-            TFT_WHITE
-        );
+            // 収束する外側リング
+            glassCanvas.drawCircle(
+                cx,
+                cy,
+                lockOuterR,
+                lockColor
+            );
 
-        // 中心点
-        glassCanvas.fillCircle(
-            cx,
-            cy,
-            1,
-            TFT_WHITE
-        );
+            // 内側捕捉リング
+            glassCanvas.drawCircle(
+                cx,
+                cy,
+                lockInnerR,
+                TFT_WHITE
+            );
 
-        // ---------------------------------------------
-        // 四隅のロックオンブラケット
-        // ---------------------------------------------
-        int bracketR =
-            22 - static_cast<int>(phase * 7.0f);
+            // 中心点
+            glassCanvas.fillCircle(
+                cx,
+                cy,
+                1,
+                TFT_WHITE
+            );
 
-        constexpr int BRACKET_LEN = 5;
+            // ---------------------------------------------
+            // 四隅のロックオンブラケット
+            // ---------------------------------------------
+            int bracketR =
+                22 - static_cast<int>(phase * 7.0f);
 
-        // 左上
-        glassCanvas.drawLine(
-            cx - bracketR,
-            cy - bracketR,
-            cx - bracketR + BRACKET_LEN,
-            cy - bracketR,
-            lockColor
-        );
+            constexpr int BRACKET_LEN = 5;
 
-        glassCanvas.drawLine(
-            cx - bracketR,
-            cy - bracketR,
-            cx - bracketR,
-            cy - bracketR + BRACKET_LEN,
-            lockColor
-        );
+            // 左上
+            glassCanvas.drawLine(
+                cx - bracketR,
+                cy - bracketR,
+                cx - bracketR + BRACKET_LEN,
+                cy - bracketR,
+                lockColor
+            );
 
-        // 右上
-        glassCanvas.drawLine(
-            cx + bracketR,
-            cy - bracketR,
-            cx + bracketR - BRACKET_LEN,
-            cy - bracketR,
-            lockColor
-        );
+            glassCanvas.drawLine(
+                cx - bracketR,
+                cy - bracketR,
+                cx - bracketR,
+                cy - bracketR + BRACKET_LEN,
+                lockColor
+            );
 
-        glassCanvas.drawLine(
-            cx + bracketR,
-            cy - bracketR,
-            cx + bracketR,
-            cy - bracketR + BRACKET_LEN,
-            lockColor
-        );
+            // 右上
+            glassCanvas.drawLine(
+                cx + bracketR,
+                cy - bracketR,
+                cx + bracketR - BRACKET_LEN,
+                cy - bracketR,
+                lockColor
+            );
 
-        // 左下
-        glassCanvas.drawLine(
-            cx - bracketR,
-            cy + bracketR,
-            cx - bracketR + BRACKET_LEN,
-            cy + bracketR,
-            lockColor
-        );
+            glassCanvas.drawLine(
+                cx + bracketR,
+                cy - bracketR,
+                cx + bracketR,
+                cy - bracketR + BRACKET_LEN,
+                lockColor
+            );
 
-        glassCanvas.drawLine(
-            cx - bracketR,
-            cy + bracketR,
-            cx - bracketR,
-            cy + bracketR - BRACKET_LEN,
-            lockColor
-        );
+            // 左下
+            glassCanvas.drawLine(
+                cx - bracketR,
+                cy + bracketR,
+                cx - bracketR + BRACKET_LEN,
+                cy + bracketR,
+                lockColor
+            );
 
-        // 右下
-        glassCanvas.drawLine(
-            cx + bracketR,
-            cy + bracketR,
-            cx + bracketR - BRACKET_LEN,
-            cy + bracketR,
-            lockColor
-        );
+            glassCanvas.drawLine(
+                cx - bracketR,
+                cy + bracketR,
+                cx - bracketR,
+                cy + bracketR - BRACKET_LEN,
+                lockColor
+            );
 
-        glassCanvas.drawLine(
-            cx + bracketR,
-            cy + bracketR,
-            cx + bracketR,
-            cy + bracketR - BRACKET_LEN,
-            lockColor
-        );
+            // 右下
+            glassCanvas.drawLine(
+                cx + bracketR,
+                cy + bracketR,
+                cx + bracketR - BRACKET_LEN,
+                cy + bracketR,
+                lockColor
+            );
 
-        // 捕捉後半にLOCK表示
-        if (phase > 0.75f) {
+            glassCanvas.drawLine(
+                cx + bracketR,
+                cy + bracketR,
+                cx + bracketR,
+                cy + bracketR - BRACKET_LEN,
+                lockColor
+            );
+        }
+
+        // -------------------------------------------------
+        // LOCK文字
+        // レティクルと一緒に点滅
+        // -------------------------------------------------
+        if (phase > 0.75f && lockReticleVisible) {
 
             int lockTextX =
                 constrain(cx - 10, 36, 104);
