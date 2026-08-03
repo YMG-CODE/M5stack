@@ -52,6 +52,7 @@ import platform
 
 import pyautogui
 import pydirectinput
+from pynput import mouse
 
 
 # ---------------------------------------------------------
@@ -461,6 +462,43 @@ class SerialSender:
             self._write(bytes([cmd, val]))
 
 
+    def send_mouse_motion(self, dx: int, dy: int):
+        if not self.is_connected():
+            return
+
+        dx = max(-127, min(127, int(dx)))
+        dy = max(-127, min(127, int(dy)))
+
+        self._write(bytes([
+            0x31,
+            dx & 0xFF,
+            dy & 0xFF
+        ]))
+
+    def send_mouse_click(self, button_id: int):
+        if not self.is_connected():
+            return
+
+        button_id = max(0, min(255, int(button_id)))
+
+        self._write(bytes([
+            0x32,
+            button_id
+        ]))
+
+
+    def send_mouse_scroll(self, wheel: int):
+        if not self.is_connected():
+            return
+
+        wheel = max(-127, min(127, int(wheel)))
+
+        self._write(bytes([
+            0x33,
+            wheel & 0xFF
+        ]))
+
+
 # ================================
 # CPM Counter (QMK互換ロジック)
 # ================================
@@ -848,6 +886,10 @@ class TypingMeterApp:
 
         self.always_on_top = tk.BooleanVar(value=True)
         # 起動時に最前面設定を反映
+
+        self._last_mouse_pos = pyautogui.position()
+        self._last_mouse_send = time.perf_counter()
+
         self.update_topmost()
 
         
@@ -913,6 +955,9 @@ class TypingMeterApp:
 
         # ==== keyboard フックを別スレッドで開始 ====
         self._setup_keyboard_hook()
+
+        # ==== マウスクリック・スクロール監視開始 ====
+        self._setup_mouse_hook()
 
         # ==== 定期更新ループ ====
         self._tick()
@@ -1487,6 +1532,42 @@ class TypingMeterApp:
         # Tkinter メインスレッドで処理
         self.root.after(0, _update)
 
+
+    def _setup_mouse_hook(self):
+
+        def on_click(x, y, button, pressed):
+            # ボタンを押した瞬間だけ送信
+            if not pressed:
+                return
+
+            button_id = {
+                mouse.Button.left: 1,
+                mouse.Button.right: 2,
+                mouse.Button.middle: 3,
+            }.get(button)
+
+            if button_id is None:
+                return
+
+            self.sender.send_mouse_click(button_id)
+
+        def on_scroll(x, y, dx, dy):
+            # 横スクロールdxは今回は使用しない
+            wheel = int(dy)
+
+            if wheel == 0:
+                return
+
+            self.sender.send_mouse_scroll(wheel)
+
+        self._mouse_listener = mouse.Listener(
+            on_click=on_click,
+            on_scroll=on_scroll
+        )
+
+        self._mouse_listener.daemon = True
+        self._mouse_listener.start()
+
     # -----------------------------
     # グローバルキーフック (別スレッド) - CPM & ソレノイド
     # -----------------------------
@@ -1579,14 +1660,38 @@ class TypingMeterApp:
         # 次回呼び出し
         self.root.after(50, self._tick)
 
+        # ---- マウス移動量をCore2へ送信 ----
+        mouse_now = time.perf_counter()
+
+        if mouse_now - self._last_mouse_send >= 0.04:  # 約25Hz
+            self._last_mouse_send = mouse_now
+
+            pos = pyautogui.position()
+
+            dx = pos.x - self._last_mouse_pos.x
+            dy = pos.y - self._last_mouse_pos.y
+
+            self._last_mouse_pos = pos
+
+            if dx != 0 or dy != 0:
+                self.sender.send_mouse_motion(dx, dy)
+
     # -----------------------------
     # 終了処理
     # -----------------------------
+
     def on_close(self):
         try:
             keyboard.unhook_all()
         except Exception:
             pass
+
+        try:
+            if hasattr(self, "_mouse_listener"):
+                self._mouse_listener.stop()
+        except Exception:
+            pass
+
         self.rawhid.stop()
         self.sender.disconnect()
         self.root.destroy()
