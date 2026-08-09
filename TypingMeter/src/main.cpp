@@ -27,8 +27,21 @@ enum HudInputMode : uint8_t {
 
 static HudInputMode hudInputMode = HUD_INPUT_CURSOR;
 
-// スクロール入力蓄積
-static volatile int16_t hudScrollDelta = 0;
+// 縦スクロール入力蓄積
+static volatile int16_t hudScrollDeltaY = 0;
+
+// 横スクロール入力蓄積
+static volatile int16_t hudScrollDeltaX = 0;
+
+
+enum HudScrollAxis : uint8_t {
+    HUD_SCROLL_NONE       = 0,
+    HUD_SCROLL_VERTICAL   = 1,
+    HUD_SCROLL_HORIZONTAL = 2,
+    HUD_SCROLL_BOTH       = 3
+};
+
+static HudScrollAxis hudScrollAxis = HUD_SCROLL_NONE;
 
 
 
@@ -469,10 +482,11 @@ void drawGlassReticle() {
     float t = now * 0.001f;
 
     // スクロール終了後はCSRへ戻す
-    if (hudInputMode == HUD_INPUT_SCROLL &&
-        now - lastHudScrollMs > HUD_MODE_HOLD_MS) {
+   if (hudInputMode == HUD_INPUT_SCROLL &&
+    now - lastHudScrollMs > HUD_MODE_HOLD_MS) {
 
-        hudInputMode = HUD_INPUT_CURSOR;
+    hudInputMode = HUD_INPUT_CURSOR;
+    hudScrollAxis = HUD_SCROLL_NONE;
     }
 
     int cpmClamped = constrain((int)currentCPM, 0, 1200);
@@ -489,12 +503,16 @@ void drawGlassReticle() {
     // -------------------------------------------------
     int16_t localDx = hudMouseDx;
     int16_t localDy = hudMouseDy;
-    int16_t localScroll = hudScrollDelta;
 
-    // 今回の描画フレームで受信値を消費する
+    int16_t localScrollY = hudScrollDeltaY;
+    int16_t localScrollX = hudScrollDeltaX;
+
+    // 今回の描画フレームで受信値を消費
     hudMouseDx = 0;
     hudMouseDy = 0;
-    hudScrollDelta = 0;
+
+    hudScrollDeltaY = 0;
+    hudScrollDeltaX = 0;
 
     // -------------------------------------------------
     // マウス移動をレティクル目標位置へ反映
@@ -504,17 +522,26 @@ void drawGlassReticle() {
 
     targetX += localDx * MOUSE_GAIN_X;
     targetY += localDy * MOUSE_GAIN_Y;
+    // -------------------------------------------------
+    // 縦スクロールを上下方向のキックとして反映
+    // -------------------------------------------------
+    if (localScrollY != 0) {
+
+        constexpr float SCROLL_KICK_Y = 1.2f;
+
+        // 正数で上方向
+        targetY -= localScrollY * SCROLL_KICK_Y;
+    }
 
     // -------------------------------------------------
-    // スクロール入力を上下方向のキックとして反映
+    // 横スクロールを左右方向のキックとして反映
     // -------------------------------------------------
-    if (localScroll != 0) {
+    if (localScrollX != 0) {
 
-        // 大きくするとスクロール時の上下移動が大きくなる
-        constexpr float SCROLL_KICK = 1.2f;
+        constexpr float SCROLL_KICK_X = 1.2f;
 
-        // 正のホイール値で上方向へ動かす
-        targetY -= localScroll * SCROLL_KICK;
+        // 正数で右方向
+        targetX += localScrollX * SCROLL_KICK_X;
     }
 
     // -------------------------------------------------
@@ -574,6 +601,17 @@ void drawGlassReticle() {
         glassCanvas.setTextColor(TFT_CYAN);
         glassCanvas.print("CSR");
     }
+
+
+    // -------------------------------------------------
+    // DEMO MODE表示
+    // -------------------------------------------------
+    if (appMode == MODE_DEMO) {
+        glassCanvas.setTextColor(TFT_WHITE);
+        glassCanvas.setCursor(2, 44);
+        glassCanvas.print("DEMO");
+    }
+    
     // -------------------------------------------------
     // 星空：手前 → 奥
     // 奥の消失点へ吸い込まれる
@@ -949,13 +987,21 @@ else {
         TFT_WHITE
     );
 
-    // SCRモード専用矢印
-    if (hudInputMode == HUD_INPUT_SCROLL) {
+// =================================================
+// SCRモード専用：縦・横スクロール矢印
+// =================================================
+if (hudInputMode == HUD_INPUT_SCROLL) {
 
-        constexpr int ARROW_DISTANCE = 20;
-        constexpr int ARROW_WIDTH = 3;
+    constexpr int ARROW_DISTANCE = 20;
+    constexpr int ARROW_WIDTH = 3;
 
-        uint16_t scrollColor = TFT_YELLOW;
+    uint16_t scrollColor = TFT_WHITE;
+
+    // -------------------------------------------------
+    // 縦スクロール：上下矢印
+    // -------------------------------------------------
+    if (hudScrollAxis == HUD_SCROLL_VERTICAL ||
+        hudScrollAxis == HUD_SCROLL_BOTH) {
 
         // 上矢印
         glassCanvas.drawLine(
@@ -991,6 +1037,48 @@ else {
             scrollColor
         );
     }
+
+    // -------------------------------------------------
+    // 横スクロール：左右矢印
+    // -------------------------------------------------
+    if (hudScrollAxis == HUD_SCROLL_HORIZONTAL ||
+        hudScrollAxis == HUD_SCROLL_BOTH) {
+
+        // 左矢印
+        glassCanvas.drawLine(
+            cx - ARROW_DISTANCE,
+            cy,
+            cx - ARROW_DISTANCE + 3,
+            cy - ARROW_WIDTH,
+            scrollColor
+        );
+
+        glassCanvas.drawLine(
+            cx - ARROW_DISTANCE,
+            cy,
+            cx - ARROW_DISTANCE + 3,
+            cy + ARROW_WIDTH,
+            scrollColor
+        );
+
+        // 右矢印
+        glassCanvas.drawLine(
+            cx + ARROW_DISTANCE,
+            cy,
+            cx + ARROW_DISTANCE - 3,
+            cy - ARROW_WIDTH,
+            scrollColor
+        );
+
+        glassCanvas.drawLine(
+            cx + ARROW_DISTANCE,
+            cy,
+            cx + ARROW_DISTANCE - 3,
+            cy + ARROW_WIDTH,
+            scrollColor
+        );
+    }
+}
 
     // 四隅の脈動点
     int pulse =
@@ -1352,10 +1440,35 @@ void applyHudMouseClick(uint8_t button) {
 }
 
 
-void applyHudScroll(int8_t wheel) {
+void applyHudScrollVertical(int8_t wheelY) {
 
-    hudScrollDelta += wheel;
-    hudScrollDelta = constrain(hudScrollDelta, -40, 40);
+    hudScrollDeltaY += wheelY;
+    hudScrollDeltaY =
+        constrain(hudScrollDeltaY, -40, 40);
+
+    // 横入力も同時期に来ていればBOTH
+    if (hudScrollAxis == HUD_SCROLL_HORIZONTAL) {
+        hudScrollAxis = HUD_SCROLL_BOTH;
+    } else {
+        hudScrollAxis = HUD_SCROLL_VERTICAL;
+    }
+
+    hudInputMode = HUD_INPUT_SCROLL;
+    lastHudScrollMs = millis();
+}
+
+void applyHudScrollHorizontal(int8_t wheelX) {
+
+    hudScrollDeltaX += wheelX;
+    hudScrollDeltaX =
+        constrain(hudScrollDeltaX, -40, 40);
+
+    // 縦入力も同時期に来ていればBOTH
+    if (hudScrollAxis == HUD_SCROLL_VERTICAL) {
+        hudScrollAxis = HUD_SCROLL_BOTH;
+    } else {
+        hudScrollAxis = HUD_SCROLL_HORIZONTAL;
+    }
 
     hudInputMode = HUD_INPUT_SCROLL;
     lastHudScrollMs = millis();
@@ -3739,6 +3852,13 @@ void processUSBSerial() {
                 // wheel
                 usb_state = 23;
             }
+
+            else if (b == 0x34) {
+                // horizontal wheel
+                usb_state = 24;
+            }
+
+
             else if (b >= 0x20 && b <= 0x26) {
                 usb_state = 10;
                 lastCmd = b;
@@ -3800,8 +3920,18 @@ case 20:
             break;
 
         case 23:
-            // スクロール
-            applyHudScroll(static_cast<int8_t>(b));
+            // 縦スクロール
+            applyHudScrollVertical(
+                static_cast<int8_t>(b)
+            );
+            usb_state = 0;
+            break;
+
+        case 24:
+            // 横スクロール
+            applyHudScrollHorizontal(
+                static_cast<int8_t>(b)
+            );
             usb_state = 0;
             break;
         
@@ -3873,10 +4003,19 @@ void processBTSerial() {
         else if (cmd == 0x33) {
             if (SerialBT.available() < 1) return;
 
-            int8_t wheel =
+            int8_t wheelY =
                 static_cast<int8_t>(SerialBT.read());
 
-            applyHudScroll(wheel);
+            applyHudScrollVertical(wheelY);
+        }
+
+        else if (cmd == 0x34) {
+            if (SerialBT.available() < 1) return;
+
+            int8_t wheelX =
+                static_cast<int8_t>(SerialBT.read());
+
+            applyHudScrollHorizontal(wheelX);
         }
     }
 }
@@ -4172,6 +4311,176 @@ void updateDemoData() {
 }
 
 
+// =====================================================
+// GLASS2 HUD DEMO
+// PCなし展示用：レティクル自動移動 + 演出
+// =====================================================
+void updateDemoHud() {
+
+    static unsigned long lastMoveMs   = 0;
+    static unsigned long lastClickMs  = 0;
+    static unsigned long lastScrollMs = 0;
+    static unsigned long lastPatternMs = 0;
+
+    // DEMO以外では何もしない
+    if (appMode != MODE_DEMO) {
+        return;
+    }
+
+    unsigned long now = millis();
+
+    // -------------------------------------------------
+    // 自動軌道のパラメータ
+    // -------------------------------------------------
+    static float phaseX = 0.0f;
+    static float phaseY = 1.4f;
+
+    static float ampX1 = 15.0f;
+    static float ampX2 = 6.0f;
+
+    static float ampY1 = 8.0f;
+    static float ampY2 = 4.0f;
+
+    // 前回の疑似座標
+    static float prevDemoX = 88.0f;
+    static float prevDemoY = 32.0f;
+
+    // -------------------------------------------------
+    // 数秒ごとに軌道を少しランダム変更
+    // -------------------------------------------------
+    if (now - lastPatternMs > 7000) {
+
+        lastPatternMs = now;
+
+        ampX1 = random(120, 190) / 10.0f;  // 12～19
+        ampX2 = random(30, 80) / 10.0f;    // 3～8
+
+        ampY1 = random(60, 110) / 10.0f;   // 6～11
+        ampY2 = random(20, 60) / 10.0f;    // 2～6
+
+        phaseX = random(0, 6283) / 1000.0f;
+        phaseY = random(0, 6283) / 1000.0f;
+    }
+
+    // -------------------------------------------------
+    // 約12Hzで疑似マウス移動
+    // GLASS2自体は約15FPSなので十分
+    // -------------------------------------------------
+    if (now - lastMoveMs >= 80) {
+
+        lastMoveMs = now;
+
+        float t = now * 0.001f;
+
+        // Lissajous風＋ランダム位相
+        // 完全ランダムより滑らかで展示向き
+        float demoX =
+            88.0f
+            + sinf(t * 0.72f + phaseX) * ampX1
+            + sinf(t * 1.31f + phaseY) * ampX2;
+
+        float demoY =
+            32.0f
+            + cosf(t * 0.61f + phaseY) * ampY1
+            + sinf(t * 1.17f + phaseX) * ampY2;
+
+        // GLASS2上の安全範囲
+        demoX = constrain(demoX, 60.0f, 112.0f);
+        demoY = constrain(demoY, 16.0f, 48.0f);
+
+        // drawGlassReticle()では
+        // X gain=0.24 / Y gain=0.20なので逆算
+        int8_t dx =
+            constrain(
+                (int)((demoX - prevDemoX) / 0.24f),
+                -30,
+                30
+            );
+
+        int8_t dy =
+            constrain(
+                (int)((demoY - prevDemoY) / 0.20f),
+                -30,
+                30
+            );
+
+        prevDemoX = demoX;
+        prevDemoY = demoY;
+
+        // スクロール演出表示中はCSRへ戻さない
+        if (hudInputMode != HUD_INPUT_SCROLL ||
+            now - lastHudScrollMs > HUD_MODE_HOLD_MS) {
+
+            applyHudMouseMotion(dx, dy);
+        }
+        else {
+            // スクロール中でもレティクル位置だけは動かす
+            hudMouseDx += dx;
+            hudMouseDy += dy;
+
+            hudMouseDx =
+                constrain(hudMouseDx, -120, 120);
+
+            hudMouseDy =
+                constrain(hudMouseDy, -120, 120);
+
+            lastHudMouseMs = now;
+        }
+    }
+
+    // -------------------------------------------------
+    // 数秒おきに自動LOCK ON
+    // -------------------------------------------------
+    if (!hudLockOnActive &&
+        now - lastClickMs > 6500) {
+
+        lastClickMs = now;
+
+        applyHudMouseClick(
+            HUD_BUTTON_LEFT
+        );
+    }
+
+    // -------------------------------------------------
+    // 数秒おきにSCR演出
+    // 縦・横を交互に出す
+    // -------------------------------------------------
+    if (!hudLockOnActive &&
+        now - lastScrollMs > 4200) {
+
+        lastScrollMs = now;
+
+        static bool horizontal = false;
+        horizontal = !horizontal;
+
+        if (horizontal) {
+
+            // 横スクロール
+            int8_t wheelX =
+                (random(0, 2) == 0)
+                    ? 3
+                    : -3;
+
+            applyHudScrollHorizontal(
+                wheelX
+            );
+
+        } else {
+
+            // 縦スクロール
+            int8_t wheelY =
+                (random(0, 2) == 0)
+                    ? 3
+                    : -3;
+
+            applyHudScrollVertical(
+                wheelY
+            );
+        }
+    }
+}
+
+
 
 // ==== 設定・初期化 ====
 void setup() {
@@ -4342,9 +4651,14 @@ void loop() {
             onSecondTick();//Global 1-second tick
         }
 
- // ==== DEMO モード処理 ====
+// ==== DEMO モード処理 ====
 if (appMode == MODE_DEMO) {
+
+    // CPM / PC Status / Layer
     updateDemoData();
+
+    // GLASS2レティクル自動展示
+    updateDemoHud();
 }
 
 // ==== 起動直後のボタン誤動作防止 ====
