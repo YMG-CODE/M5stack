@@ -486,17 +486,28 @@ class SerialSender:
             button_id
         ]))
 
-
-    def send_mouse_scroll(self, wheel: int):
+    def send_mouse_scroll_vertical(self, wheel_y: int):
         if not self.is_connected():
             return
 
-        wheel = max(-127, min(127, int(wheel)))
+        wheel_y = max(-127, min(127, int(wheel_y)))
 
         self._write(bytes([
             0x33,
-            wheel & 0xFF
+            wheel_y & 0xFF
         ]))
+
+
+    def send_mouse_scroll_horizontal(self, wheel_x: int):
+        if not self.is_connected():
+            return
+
+        wheel_x = max(-127, min(127, int(wheel_x)))
+
+        self._write(bytes([
+            0x34,
+            wheel_x & 0xFF
+        ]))  
 
 
 # ================================
@@ -1552,13 +1563,16 @@ class TypingMeterApp:
             self.sender.send_mouse_click(button_id)
 
         def on_scroll(x, y, dx, dy):
-            # 横スクロールdxは今回は使用しない
-            wheel = int(dy)
+            wheel_x = int(dx)
+            wheel_y = int(dy)
 
-            if wheel == 0:
-                return
+            # 縦スクロール
+            if wheel_y != 0:
+                self.sender.send_mouse_scroll_vertical(wheel_y)
 
-            self.sender.send_mouse_scroll(wheel)
+            # 横スクロール
+            if wheel_x != 0:
+                self.sender.send_mouse_scroll_horizontal(wheel_x)
 
         self._mouse_listener = mouse.Listener(
             on_click=on_click,
